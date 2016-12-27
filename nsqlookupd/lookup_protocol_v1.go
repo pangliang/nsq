@@ -28,14 +28,17 @@ func (p *LookupProtocolV1) IOLoop(conn net.Conn) error {
 	client := NewClientV1(conn)
 	reader := bufio.NewReader(client)
 	for {
+		// 每个指令 以 行分割
 		line, err = reader.ReadString('\n')
 		if err != nil {
 			break
 		}
 
+		// 每行格式是: 命令 参数1 参数2 ... 参数
 		line = strings.TrimSpace(line)
 		params := strings.Split(line, " ")
 
+		// 统一处理指令, 处理器统一返回response, 统一进行错误处理和响应结果的发送
 		var response []byte
 		response, err = p.Exec(client, reader, params)
 		if err != nil {
@@ -85,8 +88,10 @@ func (p *LookupProtocolV1) Exec(client *ClientV1, reader *bufio.Reader, params [
 	case "PING":
 		return p.PING(client, params)
 	case "IDENTIFY":
+		// p.ctx.nsqlookupd.DB.AddProducer(Registration{"client", "", ""}, &Producer{peerInfo: client.peerInfo})
 		return p.IDENTIFY(client, reader, params[1:])
 	case "REGISTER":
+		// 客户端注册(监听?) topic 和 channel
 		return p.REGISTER(client, reader, params[1:])
 	case "UNREGISTER":
 		return p.UNREGISTER(client, reader, params[1:])
@@ -193,6 +198,7 @@ func (p *LookupProtocolV1) IDENTIFY(client *ClientV1, reader *bufio.Reader, para
 		return nil, protocol.NewFatalClientErr(err, "E_INVALID", "cannot IDENTIFY again")
 	}
 
+	// 数据体 大小
 	var bodyLen int32
 	err = binary.Read(reader, binary.BigEndian, &bodyLen)
 	if err != nil {
@@ -252,6 +258,8 @@ func (p *LookupProtocolV1) IDENTIFY(client *ClientV1, reader *bufio.Reader, para
 func (p *LookupProtocolV1) PING(client *ClientV1, params []string) ([]byte, error) {
 	if client.peerInfo != nil {
 		// we could get a PING before other commands on the same client connection
+
+		//TODO 没太理解这个地方为什么要读出来在放回去? 就单单为了 log 一下? 那为什么要使用 atomic ?
 		cur := time.Unix(0, atomic.LoadInt64(&client.peerInfo.lastUpdate))
 		now := time.Now()
 		p.ctx.nsqlookupd.logf("CLIENT(%s): pinged (last ping %s)", client.peerInfo.id,

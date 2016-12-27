@@ -21,7 +21,7 @@ func TCPServer(listener net.Listener, handler TCPHandler, l app.Logger) {
 		if err != nil {
 			if nerr, ok := err.(net.Error); ok && nerr.Temporary() {
 				l.Output(2, fmt.Sprintf("NOTICE: temporary Accept() failure - %s", err))
-				runtime.Gosched()
+				runtime.Gosched()       // 是临时的错误, 暂停一下继续
 				continue
 			}
 			// theres no direct way to detect this error because it is not exposed

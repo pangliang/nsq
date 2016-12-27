@@ -71,8 +71,9 @@ func (r *RegistrationDB) AddRegistration(k Registration) {
 func (r *RegistrationDB) AddProducer(k Registration, p *Producer) bool {
 	r.Lock()
 	defer r.Unlock()
-	producers := r.registrationMap[k]
+	producers := r.registrationMap[k]  //?? 不需要 producers, ok := r.registrationMap[k]  ??
 	found := false
+	//TODO producers 为什么不继续使用 map[id]Producer 这样的结构? producers 不会太多? add 不会太频繁? 那好像用map也不会有太多的代价吧
 	for _, producer := range producers {
 		if producer.peerInfo.id == p.peerInfo.id {
 			found = true

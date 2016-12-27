@@ -45,11 +45,13 @@ func (l *NSQLookupd) Main() {
 		l.logf("FATAL: listen (%s) failed - %s", l.opts.TCPAddress, err)
 		os.Exit(1)
 	}
-	l.Lock()
+	l.Lock()                //TODO  这里为什么要加锁?
 	l.tcpListener = tcpListener
 	l.Unlock()
 	tcpServer := &tcpServer{ctx: ctx}
 	l.waitGroup.Wrap(func() {
+		//进入TCPServer 之前会 w.add(1) , 当收到系统信号量, program Stop 方法调用tcpListener.Close() 不在接收新请求
+		//直到当前存在的连接退出之后, 整个程序才退出. 而不是强行断开
 		protocol.TCPServer(tcpListener, tcpServer, l.opts.Logger)
 	})
 

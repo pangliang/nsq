@@ -37,12 +37,16 @@ type program struct {
 
 func main() {
 	prg := &program{}
+	//使用了svc框架, Run 时, 分别调用prg 实现的 Init 和 Start 方法 启动'program',
+	// 然后监听 后两个参数的信号量, 当信号量到达, 调用 prg 实现的 Stop 方法
 	if err := svc.Run(prg, syscall.SIGINT, syscall.SIGTERM); err != nil {
 		log.Fatal(err)
 	}
 }
 
 func (p *program) Init(env svc.Environment) error {
+	//svc 封装了不同操作系统的Deamon服务进程相关的东西
+	//TODO window deamon的不同点
 	if env.IsWindowsService() {
 		dir := filepath.Dir(os.Args[0])
 		return os.Chdir(dir)
