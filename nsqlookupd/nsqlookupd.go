@@ -45,7 +45,14 @@ func (l *NSQLookupd) Main() {
 		l.logf("FATAL: listen (%s) failed - %s", l.opts.TCPAddress, err)
 		os.Exit(1)
 	}
-	l.Lock()                //TODO  这里为什么要加锁?
+	// 这里为什么要加锁?
+	// 当前场景不好理解, 换个场景:
+	//if l.playerList.count() > 0 {
+	//	// 如果这里l 不 lock的话, 多线程 执行了 l.playerList = anotherPlayerList
+	//	// 然后再 执行delete 就不对了
+	//	l.playerList.delete(n)
+	//}
+	l.Lock()
 	l.tcpListener = tcpListener
 	l.Unlock()
 	tcpServer := &tcpServer{ctx: ctx}
