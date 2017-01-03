@@ -79,7 +79,7 @@ func New(opts *Options) *NSQD {
 	n := &NSQD{
 		startTime:            time.Now(),
 		topicMap:             make(map[string]*Topic),
-		idChan:               make(chan MessageID, 4096),
+		idChan:               make(chan MessageID, 4096), //TODO id序列 缓存??
 		exitChan:             make(chan int),
 		notifyChan:           make(chan interface{}),
 		optsNotificationChan: make(chan struct{}, 1),
@@ -89,6 +89,7 @@ func New(opts *Options) *NSQD {
 	n.swapOpts(opts)
 	n.errValue.Store(errStore{})
 
+	// 文件lock 保证只有一个实例在跑
 	err := n.dl.Lock()
 	if err != nil {
 		n.logf("FATAL: --data-path=%s in use (possibly by another instance of nsqd)", dataPath)
@@ -212,6 +213,7 @@ func (n *NSQD) Main() {
 
 	ctx := &context{n}
 
+	// tcp 处理
 	tcpListener, err := net.Listen("tcp", n.getOpts().TCPAddress)
 	if err != nil {
 		n.logf("FATAL: listen (%s) failed - %s", n.getOpts().TCPAddress, err)
@@ -225,6 +227,7 @@ func (n *NSQD) Main() {
 		protocol.TCPServer(n.tcpListener, tcpServer, n.getOpts().Logger)
 	})
 
+	// https
 	if n.tlsConfig != nil && n.getOpts().HTTPSAddress != "" {
 		httpsListener, err = tls.Listen("tcp", n.getOpts().HTTPSAddress, n.tlsConfig)
 		if err != nil {
@@ -239,6 +242,8 @@ func (n *NSQD) Main() {
 			http_api.Serve(n.httpsListener, httpsServer, "HTTPS", n.getOpts().Logger)
 		})
 	}
+
+	// http
 	httpListener, err = net.Listen("tcp", n.getOpts().HTTPAddress)
 	if err != nil {
 		n.logf("FATAL: listen (%s) failed - %s", n.getOpts().HTTPAddress, err)
@@ -506,6 +511,7 @@ func (n *NSQD) DeleteExistingTopic(topicName string) error {
 	return nil
 }
 
+// 一直生产 序列化 id
 func (n *NSQD) idPump() {
 	factory := &guidFactory{}
 	lastError := time.Unix(0, 0)
@@ -522,6 +528,9 @@ func (n *NSQD) idPump() {
 			runtime.Gosched()
 			continue
 		}
+
+		//这里利用了 golang 的chan 满了阻塞的特性,
+		//如果n.idChan 这个id缓存池满了, 就阻塞不会继续生产
 		select {
 		case n.idChan <- id.Hex():
 		case <-n.exitChan:
@@ -576,6 +585,7 @@ func (n *NSQD) channels() []*Channel {
 //
 // 	1 <= pool <= min(num * 0.25, QueueScanWorkerPoolMax)
 //
+// http://blog.csdn.net/hurray123/article/details/50765207
 func (n *NSQD) resizePool(num int, workCh chan *Channel, responseCh chan bool, closeCh chan int) {
 	idealPoolSize := int(float64(num) * 0.25)
 	if idealPoolSize < 1 {
@@ -615,12 +625,25 @@ func (n *NSQD) queueScanWorker(workCh chan *Channel, responseCh chan bool, close
 				dirty = true
 			}
 			responseCh <- dirty
+		//注意这个地方, 跟 之前的close(exitChan) 用法不同
+		//这里是启动多个worker, 然后当判断worker太多了, 需要关闭一个多余的worker时
+		//给 closeCh <- 1 发个消息, 利用golang chan 随机分发的特性
+		//这样就会随机的关闭掉一个 worker, 也就是随机退出一个 queueScanWorker 的 循环
 		case <-closeCh:
 			return
 		}
 	}
 }
 
+/*
+Channel本身在投递消息给消费者时维护两个队列，一个是inFlight队列，该队列存储正在投递，
+但还没被标记为投递成功的消息。另一个是deferred队列，用来存储需要被延时投递的消息。
+
+inFlight队列中消息可能因为投递超时而失败，deferred队列中的消息需要在到达指定时间后进行重新投递。
+如果为两个队列中的每个消息都分别指定定时器，无疑是非常消耗资源的。因此nsq采用定时扫描队列的做法。
+在扫描时采用多个worker分别处理。这种类似多线程的处理方式提高了处理效率。
+nsq在扫描策略上使用了Redis的probabilistic expiration算法，同时动态调整worker的数量，这些优化平衡了效率和资源占用。
+ */
 // queueScanLoop runs in a single goroutine to process in-flight and deferred
 // priority queues. It manages a pool of queueScanWorker (configurable max of
 // QueueScanWorkerPoolMax (default: 4)) that process channels concurrently.
@@ -665,6 +688,7 @@ func (n *NSQD) queueScanLoop() {
 		}
 
 	loop:
+		// 随机取出几个 channel
 		for _, i := range util.UniqRands(num, len(channels)) {
 			workCh <- channels[i]
 		}

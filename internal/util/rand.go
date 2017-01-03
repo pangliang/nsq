@@ -4,6 +4,7 @@ import (
 	"math/rand"
 )
 
+//TODO
 func UniqRands(l int, n int) []int {
 	set := make(map[int]struct{})
 	nums := make([]int, 0, l)

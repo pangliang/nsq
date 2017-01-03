@@ -205,6 +205,8 @@ func (t *Topic) Depth() int64 {
 	return int64(len(t.memoryMsgChan)) + t.backend.Depth()
 }
 
+// 每个 topic 自己有一个 messagePump 消息投递 loop
+
 // messagePump selects over the in-memory and backend queue and
 // writes messages to every channel for this topic
 func (t *Topic) messagePump() {
@@ -215,6 +217,7 @@ func (t *Topic) messagePump() {
 	var memoryMsgChan chan *Message
 	var backendChan chan []byte
 
+	//避免 锁竞争, 所以缓存 已存在的 channel
 	t.RLock()
 	for _, c := range t.channelMap {
 		chans = append(chans, c)
@@ -236,6 +239,8 @@ func (t *Topic) messagePump() {
 				continue
 			}
 		case <-t.channelUpdateChan:
+			//之前 避免 锁竞争, 缓存了 已存在的 channel
+			//假如更新了 channel 会发一个 消息过来, 重新读取 channel
 			chans = chans[:0]
 			t.RLock()
 			for _, c := range t.channelMap {
