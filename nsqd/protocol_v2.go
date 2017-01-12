@@ -39,25 +39,29 @@ func (p *protocolV2) IOLoop(conn net.Conn) error {
 	var line []byte
 	var zeroTime time.Time
 
+	// nsqd 范围的 clientID 序列
 	clientID := atomic.AddInt64(&p.ctx.nsqd.clientIDSequence, 1)
 	client := newClientV2(clientID, conn, p.ctx)
 
-	// synchronize the startup of messagePump in order
-	// to guarantee that it gets a chance to initialize
-	// goroutine local state derived from client attributes
-	// and avoid a potential race with IDENTIFY (where a client
-	// could have changed or disabled said attributes)
+	// 这个messagePump 名字很形象, 把要发送给client 的messgae 从 缓存池子里Pump 抽出来 做具体的发送
 	messagePumpStartedChan := make(chan bool)
 	go p.messagePump(client, messagePumpStartedChan)
-	<-messagePumpStartedChan
+	<-messagePumpStartedChan  //TODO messagePump 里要做初始化, 具体是什么? 为什么需要这样阻塞一下IOLoop ?
 
+	// 底下这个地方是 处理 client 的请求的
 	for {
+		// 如果 client 设置需要做心跳检查, 则设置 读超时为 两倍 心跳检查间隔
+		// 也就是说, 在这个时间里, 正常情况下, client肯定会在这个间隔内发一个心跳包过来
+		// read 不会因为client 本来就没消息而超时,
+		// 但是如果还是超时了, 那就肯定是 网络连接除了问题
 		if client.HeartbeatInterval > 0 {
 			client.SetReadDeadline(time.Now().Add(client.HeartbeatInterval * 2))
 		} else {
+			// 加入client 不设置做心跳则不设置读超时
 			client.SetReadDeadline(zeroTime)
 		}
 
+		//TODO 没太懂这个什么意思.
 		// ReadSlice does not allocate new space for the data each request
 		// ie. the returned slice is only valid until the next call to it
 		line, err = client.Reader.ReadSlice('\n')
@@ -70,18 +74,20 @@ func (p *protocolV2) IOLoop(conn net.Conn) error {
 			break
 		}
 
-		// trim the '\n'
+		// 这个V2 版本的协议, 一行是一个命令
 		line = line[:len(line)-1]
-		// optionally trim the '\r'
+		// optionally trim the '\r' , 处理一下\r, 有可能win版本的回车是 \r\n
 		if len(line) > 0 && line[len(line)-1] == '\r' {
 			line = line[:len(line)-1]
 		}
+		// 每个命令, 用 " "空格来划分 参数
 		params := bytes.Split(line, separatorBytes)
 
 		if p.ctx.nsqd.getOpts().Verbose {
 			p.ctx.nsqd.logf("PROTOCOL(V2): [%s] %s", client, params)
 		}
 
+		// 执行命令
 		var response []byte
 		response, err = p.Exec(client, params)
 		if err != nil {
@@ -104,6 +110,7 @@ func (p *protocolV2) IOLoop(conn net.Conn) error {
 			continue
 		}
 
+		// 加入命令是有 '响应' 的, 发送响应
 		if response != nil {
 			err = p.Send(client, frameTypeResponse, response)
 			if err != nil {
@@ -115,7 +122,12 @@ func (p *protocolV2) IOLoop(conn net.Conn) error {
 
 	p.ctx.nsqd.logf("PROTOCOL(V2): [%s] exiting ioloop", client)
 	conn.Close()
+
+	// 通知 messagePump 退出
 	close(client.ExitChan)
+
+	// 如果订阅了Channel, 告诉channel 删除 client
+	// TODO topic 不能是也能订阅吗? 怎么不删除?
 	if client.Channel != nil {
 		client.Channel.RemoveClient(client.ID)
 	}
@@ -144,6 +156,7 @@ func (p *protocolV2) SendMessage(client *clientV2, msg *Message, buf *bytes.Buff
 }
 
 func (p *protocolV2) Send(client *clientV2, frameType int32, data []byte) error {
+	// 因为client 的处理 还有一个 messagePump 线程, 所以 发送要锁
 	client.writeLock.Lock()
 
 	var zeroTime time.Time
@@ -153,6 +166,9 @@ func (p *protocolV2) Send(client *clientV2, frameType int32, data []byte) error 
 		client.SetWriteDeadline(zeroTime)
 	}
 
+	//V2 协议版本 发送给client, 是 使用 [(4byte)消息长度 , (4byte)消息类型, (载体)] 的 帧格式
+	//但是为什么这个 格式的封装不是 写在 protocal_v2.go 而是在 protocaol 定义上?
+	//个人觉得, 具体封包格式的 '具体实现' 应该在 '协议的具体实现'里,  也就是 protocal_v2, 而不是 '协议的定义' 里
 	_, err := protocol.SendFramedResponse(client.Writer, frameType, data)
 	if err != nil {
 		client.writeLock.Unlock()

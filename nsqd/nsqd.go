@@ -38,27 +38,27 @@ type errStore struct {
 
 type NSQD struct {
 	// 64bit atomic vars need to be first for proper alignment on 32bit platforms
-	clientIDSequence int64
+	clientIDSequence     int64
 
 	sync.RWMutex
 
-	opts atomic.Value
+	opts                 atomic.Value
 
-	dl        *dirlock.DirLock
-	isLoading int32
-	errValue  atomic.Value
-	startTime time.Time
+	dl                   *dirlock.DirLock
+	isLoading            int32
+	errValue             atomic.Value
+	startTime            time.Time
 
-	topicMap map[string]*Topic
+	topicMap             map[string]*Topic
 
-	lookupPeers atomic.Value
+	lookupPeers          atomic.Value
 
-	tcpListener   net.Listener
-	httpListener  net.Listener
-	httpsListener net.Listener
-	tlsConfig     *tls.Config
+	tcpListener          net.Listener
+	httpListener         net.Listener
+	httpsListener        net.Listener
+	tlsConfig            *tls.Config
 
-	poolSize int
+	poolSize             int
 
 	idChan               chan MessageID
 	notifyChan           chan interface{}
@@ -66,7 +66,7 @@ type NSQD struct {
 	exitChan             chan int
 	waitGroup            util.WaitGroupWrapper
 
-	ci *clusterinfo.ClusterInfo
+	ci                   *clusterinfo.ClusterInfo
 }
 
 func New(opts *Options) *NSQD {
@@ -115,7 +115,7 @@ func New(opts *Options) *NSQD {
 		}
 		statsdHostKey := statsd.HostKey(net.JoinHostPort(opts.BroadcastAddress, port))
 		prefixWithHost := strings.Replace(opts.StatsdPrefix, "%s", statsdHostKey, -1)
-		if prefixWithHost[len(prefixWithHost)-1] != '.' {
+		if prefixWithHost[len(prefixWithHost) - 1] != '.' {
 			prefixWithHost += "."
 		}
 		opts.StatsdPrefix = prefixWithHost
@@ -257,11 +257,19 @@ func (n *NSQD) Main() {
 		http_api.Serve(n.httpListener, httpServer, "HTTP", n.getOpts().Logger)
 	})
 
-	n.waitGroup.Wrap(func() { n.queueScanLoop() })
-	n.waitGroup.Wrap(func() { n.idPump() })
-	n.waitGroup.Wrap(func() { n.lookupLoop() })
+	n.waitGroup.Wrap(func() {
+		n.queueScanLoop()
+	})
+	n.waitGroup.Wrap(func() {
+		n.idPump()
+	})
+	n.waitGroup.Wrap(func() {
+		n.lookupLoop()
+	})
 	if n.getOpts().StatsdAddress != "" {
-		n.waitGroup.Wrap(func() { n.statsdLoop() })
+		n.waitGroup.Wrap(func() {
+			n.statsdLoop()
+		})
 	}
 }
 
@@ -361,7 +369,7 @@ func (n *NSQD) PersistMetadata() error {
 	}
 
 	tmpFileName := fmt.Sprintf("%s.%d.tmp", fileName, rand.Int())
-	f, err := os.OpenFile(tmpFileName, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	f, err := os.OpenFile(tmpFileName, os.O_WRONLY | os.O_CREATE | os.O_TRUNC, 0600)
 	if err != nil {
 		return err
 	}
@@ -538,7 +546,7 @@ func (n *NSQD) idPump() {
 		}
 	}
 
-exit:
+	exit:
 	n.logf("ID: closing")
 }
 
@@ -587,6 +595,7 @@ func (n *NSQD) channels() []*Channel {
 //
 // http://blog.csdn.net/hurray123/article/details/50765207
 func (n *NSQD) resizePool(num int, workCh chan *Channel, responseCh chan bool, closeCh chan int) {
+	// 设置池子的 数量 为 work 的 1/4
 	idealPoolSize := int(float64(num) * 0.25)
 	if idealPoolSize < 1 {
 		idealPoolSize = 1
@@ -594,9 +603,13 @@ func (n *NSQD) resizePool(num int, workCh chan *Channel, responseCh chan bool, c
 		idealPoolSize = n.getOpts().QueueScanWorkerPoolMax
 	}
 	for {
+		//一直循环, 直到 池子 的数量满足要求
 		if idealPoolSize == n.poolSize {
 			break
 		} else if idealPoolSize < n.poolSize {
+			// 利用 chan 的特性, 向closeCh 推一个消息, 这样 所有的 worCh 就会随机有一个收到这个消息, 然后关闭
+			// 这里跟 exitCh 的用法不同, exitCh 是要告知 "所有的" looper 退出, 所以使用的是 close(exitCh) 的用法
+			// 而如果想 让其中 一个 退出, 则使用 exitCh <- 1 的用法
 			// contract
 			closeCh <- 1
 			n.poolSize--
@@ -610,17 +623,38 @@ func (n *NSQD) resizePool(num int, workCh chan *Channel, responseCh chan bool, c
 	}
 }
 
+// 队列扫描消费者, 或者叫 workCh 的消费者, 也就是 任务的消费者
+// 这个任务就是一个 消息的投递
 // queueScanWorker receives work (in the form of a channel) from queueScanLoop
 // and processes the deferred and in-flight queues
 func (n *NSQD) queueScanWorker(workCh chan *Channel, responseCh chan bool, closeCh chan int) {
 	for {
 		select {
 		case c := <-workCh:
+
+		// InFlightQueue 是 container/head 包实现的一个优先级队列, 队列的顶部的优先级最小
+		// head 是一个 堆数据结构, 优先级队列 是一个 小根堆
+		// TODO: 对算法 https://idisfkj.github.io/2016/06/19/%E7%AE%97%E6%B3%95-%E4%B8%83-%E5%A0%86%E6%8E%92%E5%BA%8F/
 			now := time.Now().UnixNano()
 			dirty := false
 			if c.processInFlightQueue(now) {
 				dirty = true
 			}
+
+		// DeferredQueue 也是一个优先级队列
+		// 然后将这个 优先级队列 转换为 延时队列 来使用
+		// 将 任务"触发(发动)时间" 当做优先级, 放到队列里,
+		// 那么, 队列的顶端的任务的 "优先级最小",  也就是 "出发时间最早"
+		// 假如, 顶端任务的 触发时间 小于当前时间, 也就是触发时间还没到, 怎什么都不干,
+		// 并返回false, 表示 没有脏数据
+		// InFlightQueue 和 DeferredQueue 为什么要实现两次, InFlightQueue 其实跟 DeferredQueue 不是一样的么?
+		// 还真是, 之前两个就是一样的, 后来有一个提交: https://github.com/nsqio/nsq/commit/74bfde101934700cb0cd980d01b6dfe2fe5a6a53
+		// 里面的注释是: this eliminates the use of container/heap and
+		//	       the associated cost of boxing and interface
+		//             type assertions.
+		// 意思就是说, 这些 队列里 存的是 Message 这个类型, 如果使用 heap, 需要存到 heap.Item 的 Value 里
+		// 而这个value 是一个 interface{} , 赋值 和 取值 都需要做类型推断 和 包装
+		// 那么作为 InFlightQueue 这个 "高负荷" 的队列, 减少这种 "类型推断和包装" , 有利于提高性能
 			if c.processDeferredQueue(now) {
 				dirty = true
 			}
@@ -687,7 +721,7 @@ func (n *NSQD) queueScanLoop() {
 			num = len(channels)
 		}
 
-	loop:
+		loop:
 		// 随机取出几个 channel
 		for _, i := range util.UniqRands(num, len(channels)) {
 			workCh <- channels[i]
@@ -700,12 +734,12 @@ func (n *NSQD) queueScanLoop() {
 			}
 		}
 
-		if float64(numDirty)/float64(num) > n.getOpts().QueueScanDirtyPercent {
+		if float64(numDirty) / float64(num) > n.getOpts().QueueScanDirtyPercent {
 			goto loop
 		}
 	}
 
-exit:
+	exit:
 	n.logf("QUEUESCAN: closing")
 	close(closeCh)
 	workTicker.Stop()
