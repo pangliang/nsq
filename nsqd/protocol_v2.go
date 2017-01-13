@@ -185,13 +185,16 @@ func (p *protocolV2) Send(client *clientV2, frameType int32, data []byte) error 
 }
 
 func (p *protocolV2) Exec(client *clientV2, params [][]byte) ([]byte, error) {
+	//这个命令不需要做认证
 	if bytes.Equal(params[0], []byte("IDENTIFY")) {
 		return p.IDENTIFY(client, params)
 	}
+	// client 是否做了认证
 	err := enforceTLSPolicy(client, p, params[0])
 	if err != nil {
 		return nil, err
 	}
+	//一行一个请求, 一个命令中用 " " 空格分割参数, 第一个参数是 命令标志
 	switch {
 	case bytes.Equal(params[0], []byte("FIN")):
 		return p.FIN(client, params)
@@ -291,6 +294,7 @@ func (p *protocolV2) messagePump(client *clientV2, startedChan chan bool) {
 			}
 			flushed = true
 		case <-client.ReadyStateChan:
+		//Client 需要发送一个SUB 请求 来订阅Channel, 并切一个Client只能订阅一个Channel
 		case subChannel = <-subEventChan:
 			// you can't SUB anymore
 			subEventChan = nil
@@ -340,13 +344,18 @@ func (p *protocolV2) messagePump(client *clientV2, startedChan chan bool) {
 			}
 			flushed = false
 		case msg := <-memoryMsgChan:
+			//TODO 样本率? 做测试用的吗?
 			if sampleRate > 0 && rand.Int31n(100) > sampleRate {
 				continue
 			}
 			msg.Attempts++
 
+			//TODO 这个是什么作用?
 			subChannel.StartInFlightTimeout(msg, client.ID, msgTimeout)
 			client.SendingMessage()
+
+			// protocol 进行消息格式的打包, 再发送给Client
+			// 这里, Message 就发送给了 client
 			err = p.SendMessage(client, msg, &buf)
 			if err != nil {
 				goto exit
@@ -758,6 +767,7 @@ func (p *protocolV2) NOP(client *clientV2, params [][]byte) ([]byte, error) {
 	return nil, nil
 }
 
+//客户端推送消息
 func (p *protocolV2) PUB(client *clientV2, params [][]byte) ([]byte, error) {
 	var err error
 
@@ -765,12 +775,14 @@ func (p *protocolV2) PUB(client *clientV2, params [][]byte) ([]byte, error) {
 		return nil, protocol.NewFatalClientErr(nil, "E_INVALID", "PUB insufficient number of parameters")
 	}
 
+	//请求格式: [ PUB topicName ...]
 	topicName := string(params[1])
 	if !protocol.IsValidTopicName(topicName) {
 		return nil, protocol.NewFatalClientErr(nil, "E_BAD_TOPIC",
 			fmt.Sprintf("PUB topic name %q is not valid", topicName))
 	}
 
+	//消息体, 在client 请求的下一行开始, 头4个字节是消息体长度
 	bodyLen, err := readLen(client.Reader, client.lenSlice)
 	if err != nil {
 		return nil, protocol.NewFatalClientErr(err, "E_BAD_MESSAGE", "PUB failed to read message body size")
@@ -781,23 +793,30 @@ func (p *protocolV2) PUB(client *clientV2, params [][]byte) ([]byte, error) {
 			fmt.Sprintf("PUB invalid message body size %d", bodyLen))
 	}
 
+	//长度是否过大
 	if int64(bodyLen) > p.ctx.nsqd.getOpts().MaxMsgSize {
 		return nil, protocol.NewFatalClientErr(nil, "E_BAD_MESSAGE",
 			fmt.Sprintf("PUB message too big %d > %d", bodyLen, p.ctx.nsqd.getOpts().MaxMsgSize))
 	}
 
+	//简历缓冲区并读入
 	messageBody := make([]byte, bodyLen)
 	_, err = io.ReadFull(client.Reader, messageBody)
 	if err != nil {
 		return nil, protocol.NewFatalClientErr(err, "E_BAD_MESSAGE", "PUB failed to read message body")
 	}
 
+	//client 是否有权限对这个 topic 做 PUB 操作
 	if err := p.CheckAuth(client, "PUB", topicName, ""); err != nil {
 		return nil, err
 	}
 
 	topic := p.ctx.nsqd.GetTopic(topicName)
+
+	//创建 Message 对象, TODO: nsqd 的 唯一id 发生器
 	msg := NewMessage(<-p.ctx.nsqd.idChan, messageBody)
+
+	//topic 发送消息
 	err = topic.PutMessage(msg)
 	if err != nil {
 		return nil, protocol.NewFatalClientErr(err, "E_PUB_FAILED", "PUB failed "+err.Error())

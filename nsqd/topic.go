@@ -153,15 +153,19 @@ func (t *Topic) DeleteExistingChannel(channelName string) error {
 
 // PutMessage writes a Message to the queue
 func (t *Topic) PutMessage(m *Message) error {
+	//这里是个 ReadLock, 应该是为了锁住 exitFlag ?
 	t.RLock()
 	defer t.RUnlock()
+	//这里使用了一个 atomic Int32 类型的 exitFlag 退出标志, 如果已经退出了就不在 put 了
 	if atomic.LoadInt32(&t.exitFlag) == 1 {
 		return errors.New("exiting")
 	}
+	//发送
 	err := t.put(m)
 	if err != nil {
 		return err
 	}
+	//做个计数
 	atomic.AddUint64(&t.messageCount, 1)
 	return nil
 }
@@ -184,11 +188,31 @@ func (t *Topic) PutMessages(msgs []*Message) error {
 }
 
 func (t *Topic) put(m *Message) error {
+	// 这里巧妙利用了 chan 的特性
+	// 先写入 memoryMsgChan 这个队列,假如 memoryMsgChan 已满, 不可写入
+	// golang 就会执行 default 语句,
 	select {
-	case t.memoryMsgChan <- m:
+	case t.memoryMsgChan <- m: //'变量' 不都是内存? 这个 '内存', 是相对于 下面这个 DiskQueue 来讲的)
 	default:
+
+		// 利用 sync.Pool 包 做了一个 bytes.Buffer 的缓存池, 从池中取出一个来用
+		// <<go语言的官方包sync.Pool的实现原理和适用场景>> :
+		// http://blog.csdn.net/yongjian_lian/article/details/42058893
 		b := bufferPoolGet()
+
+		// 这个 t.backend, 在NewTopic 函数中初始化, 它具体是一个 DiskQueue
+		//TODO 先不去管他的具体实现, 暂时认识它是把消息 写入硬盘 就好
+		//t.backend = newDiskQueue(topicName,
+		//	ctx.nsqd.getOpts().DataPath,
+		//	ctx.nsqd.getOpts().MaxBytesPerFile,
+		//	int32(minValidMsgLength),
+		//	int32(ctx.nsqd.getOpts().MaxMsgSize)+minValidMsgLength,
+		//	ctx.nsqd.getOpts().SyncEvery,
+		//	ctx.nsqd.getOpts().SyncTimeout,
+		//	ctx.nsqd.getOpts().Logger)
 		err := writeMessageToBackend(b, m, t.backend)
+
+		// 放回缓存池
 		bufferPoolPut(b)
 		t.ctx.nsqd.SetHealth(err)
 		if err != nil {
@@ -206,9 +230,6 @@ func (t *Topic) Depth() int64 {
 }
 
 // 每个 topic 自己有一个 messagePump 消息投递 loop
-
-// messagePump selects over the in-memory and backend queue and
-// writes messages to every channel for this topic
 func (t *Topic) messagePump() {
 	var msg *Message
 	var buf []byte
@@ -268,6 +289,7 @@ func (t *Topic) messagePump() {
 			goto exit
 		}
 
+		// 这里需要 遍历 t.channelMap, 普通的写法, 会导致锁竞争太大
 		for i, channel := range chans {
 			chanMsg := msg
 			// copy the message because each channel
