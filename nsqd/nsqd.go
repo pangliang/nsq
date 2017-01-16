@@ -523,16 +523,18 @@ func (n *NSQD) DeleteExistingTopic(topicName string) error {
 func (n *NSQD) idPump() {
 	factory := &guidFactory{}
 	lastError := time.Unix(0, 0)
+	//因为可以做成 nsqd 集群, 所以 msgid 关联 nsq id
 	workerID := n.getOpts().ID
 	for {
 		id, err := factory.NewGUID(workerID)
 		if err != nil {
-			now := time.Now()
+			now := time.Now() // 就是打印记时
 			if now.Sub(lastError) > time.Second {
 				// only print the error once/second
 				n.logf("ERROR: %s", err)
 				lastError = now
 			}
+			// ts + sequence 满了, 休息一会, 让ts 发生改变
 			runtime.Gosched()
 			continue
 		}

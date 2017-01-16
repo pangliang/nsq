@@ -38,6 +38,7 @@ type guidFactory struct {
 	lastID        guid
 }
 
+// id = [ 37位ts + 10位 workerId + 12位 sequence ]
 func (f *guidFactory) NewGUID(workerID int64) (guid, error) {
 	// divide by 1048576, giving pseudo-milliseconds
 	ts := time.Now().UnixNano() >> 20
@@ -46,6 +47,7 @@ func (f *guidFactory) NewGUID(workerID int64) (guid, error) {
 		return 0, ErrTimeBackwards
 	}
 
+	// ts 跟上次相同的话, 就把序号sequence+1
 	if f.lastTimestamp == ts {
 		f.sequence = (f.sequence + 1) & sequenceMask
 		if f.sequence == 0 {
@@ -57,6 +59,7 @@ func (f *guidFactory) NewGUID(workerID int64) (guid, error) {
 
 	f.lastTimestamp = ts
 
+	// id = [ 37位ts + 10位 workerId + 12位 sequence ]
 	id := guid(((ts - twepoch) << timestampShift) |
 		(workerID << workerIDShift) |
 		f.sequence)
