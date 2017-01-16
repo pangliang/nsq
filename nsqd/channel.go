@@ -331,10 +331,12 @@ func (c *Channel) TouchMessage(clientID int64, id MessageID, clientMsgTimeout ti
 
 // FinishMessage successfully discards an in-flight message
 func (c *Channel) FinishMessage(clientID int64, id MessageID) error {
+	//删除 inFlightMessages 缓存
 	msg, err := c.popInFlightMessage(clientID, id)
 	if err != nil {
 		return err
 	}
+	// 从超时队列中删除
 	c.removeFromInFlightPQ(msg)
 	if c.e2eProcessingLatencyStream != nil {
 		c.e2eProcessingLatencyStream.Insert(msg.Timestamp)

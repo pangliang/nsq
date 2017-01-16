@@ -196,6 +196,7 @@ func (p *protocolV2) Exec(client *clientV2, params [][]byte) ([]byte, error) {
 	}
 	//一行一个请求, 一个命令中用 " " 空格分割参数, 第一个参数是 命令标志
 	switch {
+	// 当一个客户端成功接收到msg 并处理完成, 按照协议会向nsqd 发送一个 "FIN" 命令通知nsqd, 这时候nsqd 会将这条msg 从InFlight队列中删除
 	case bytes.Equal(params[0], []byte("FIN")):
 		return p.FIN(client, params)
 	case bytes.Equal(params[0], []byte("RDY")):
@@ -710,6 +711,7 @@ func (p *protocolV2) FIN(client *clientV2, params [][]byte) ([]byte, error) {
 			fmt.Sprintf("FIN %s failed %s", *id, err.Error()))
 	}
 
+	// 做些 client 计数
 	client.FinishedMessage()
 
 	return nil, nil
