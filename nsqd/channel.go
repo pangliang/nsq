@@ -399,11 +399,14 @@ func (c *Channel) StartInFlightTimeout(msg *Message, clientID int64, timeout tim
 	now := time.Now()
 	msg.clientID = clientID
 	msg.deliveryTS = now
+	// msg的 优先级是 超时的时间戳
 	msg.pri = now.Add(timeout).UnixNano()
+	//放到缓存, 按msg.ID, 记录一下, 估计方便之后查找: c.inFlightMessages[msg.ID]
 	err := c.pushInFlightMessage(msg)
 	if err != nil {
 		return err
 	}
+	//放到一个叫 Inflight的队列里
 	c.addToInFlightPQ(msg)
 	return nil
 }
@@ -541,8 +544,9 @@ func (c *Channel) processDeferredQueue(t int64) bool {
 exit:
 	return dirty
 }
-
+//把 InFlightQueue 里, 优先级 小于 参数 t 的, 全部重新发送
 func (c *Channel) processInFlightQueue(t int64) bool {
+	// 先 检查是否已经 退出
 	c.exitMutex.RLock()
 	defer c.exitMutex.RUnlock()
 
@@ -553,27 +557,38 @@ func (c *Channel) processInFlightQueue(t int64) bool {
 	dirty := false
 	for {
 		c.inFlightMutex.Lock()
+		// 如果 栈顶元素的优先级 小于参数
+		// 弹出 栈顶元素并返回
 		msg, _ := c.inFlightPQ.PeekAndShift(t)
 		c.inFlightMutex.Unlock()
 
+		//如果 栈顶 元素的优先级 大于参数, 返回 nil
 		if msg == nil {
+			// 没有大于 指定参数优先级的元素, 什么也不做, 返回 deirty = false
 			goto exit
 		}
+		//标记是 "脏" 的
 		dirty = true
 
+		//把之前存起来的 msg 取出来
+		//TODO: inFlightPQ 里存的不就是msg 么, 怎么又存一次?
 		_, err := c.popInFlightMessage(msg.clientID, msg.ID)
 		if err != nil {
 			goto exit
 		}
 		atomic.AddUint64(&c.timeoutCount, 1)
+
 		c.RLock()
 		client, ok := c.clients[msg.clientID]
 		c.RUnlock()
 		if ok {
+			//找出这个msg 原来是发给哪个client 发的
+			//通知它这个msg timeout了, nsqd 要重发了
 			client.TimedOutMessage()
 		}
+		// 重发, 重新塞入队列: channel.memoryMsgChan <- m:
 		c.doRequeue(msg)
-	}
+	}	//循环直到队列里 没有满足条件的
 
 exit:
 	return dirty

@@ -595,7 +595,7 @@ func (n *NSQD) channels() []*Channel {
 //
 // http://blog.csdn.net/hurray123/article/details/50765207
 func (n *NSQD) resizePool(num int, workCh chan *Channel, responseCh chan bool, closeCh chan int) {
-	// 设置池子的 数量 为 work 的 1/4
+	// 设置 queueScanWorker 的 数量 为 当前 nsqd 所有channel 个数的 1/4
 	idealPoolSize := int(float64(num) * 0.25)
 	if idealPoolSize < 1 {
 		idealPoolSize = 1
@@ -603,18 +603,19 @@ func (n *NSQD) resizePool(num int, workCh chan *Channel, responseCh chan bool, c
 		idealPoolSize = n.getOpts().QueueScanWorkerPoolMax
 	}
 	for {
-		//一直循环, 直到 池子 的数量满足要求
+		//queueScanWorker 多了就减少一个, 少了就增加一个
+		//一直循环, 直到 queueScanWorker 的数量满足要求
 		if idealPoolSize == n.poolSize {
 			break
 		} else if idealPoolSize < n.poolSize {
+			// queueScanWorker 多了, 减少一个
 			// 利用 chan 的特性, 向closeCh 推一个消息, 这样 所有的 worCh 就会随机有一个收到这个消息, 然后关闭
-			// 这里跟 exitCh 的用法不同, exitCh 是要告知 "所有的" looper 退出, 所以使用的是 close(exitCh) 的用法
+			// 细节: 这里跟 exitCh 的用法不同, exitCh 是要告知 "所有的" looper 退出, 所以使用的是 close(exitCh) 的用法
 			// 而如果想 让其中 一个 退出, 则使用 exitCh <- 1 的用法
-			// contract
 			closeCh <- 1
 			n.poolSize--
 		} else {
-			// expand
+			// queueScanWorker 少了, 增加一个
 			n.waitGroup.Wrap(func() {
 				n.queueScanWorker(workCh, responseCh, closeCh)
 			})
@@ -623,38 +624,28 @@ func (n *NSQD) resizePool(num int, workCh chan *Channel, responseCh chan bool, c
 	}
 }
 
-// 队列扫描消费者, 或者叫 workCh 的消费者, 也就是 任务的消费者
-// 这个任务就是一个 消息的投递
-// queueScanWorker receives work (in the form of a channel) from queueScanLoop
-// and processes the deferred and in-flight queues
+// 这里应该是 "生产者/消费者" 模式
+// 这个函数是 队列扫描 "消费者", 消费的是 扫描 channel InFlightQueue 和 DeferredQueue 的任务
 func (n *NSQD) queueScanWorker(workCh chan *Channel, responseCh chan bool, closeCh chan int) {
 	for {
 		select {
 		case c := <-workCh:
 
-		// InFlightQueue 是 container/head 包实现的一个优先级队列, 队列的顶部的优先级最小
-		// head 是一个 堆数据结构, 优先级队列 是一个 小根堆
-		// TODO: 对算法 https://idisfkj.github.io/2016/06/19/%E7%AE%97%E6%B3%95-%E4%B8%83-%E5%A0%86%E6%8E%92%E5%BA%8F/
+			// InFlightQueue 是 container/head 包实现的一个优先级队列, 队列的顶部的优先级最小
+			// head 是一个 堆数据结构, 优先级队列 是一个 小根堆
+			// TODO: 堆算法 https://idisfkj.github.io/2016/06/19/%E7%AE%97%E6%B3%95-%E4%B8%83-%E5%A0%86%E6%8E%92%E5%BA%8F/
+			// 然后将这个 优先级队列做了一个转换, 当做 "超时队列" 来用,
+			// 具体办法是将 超时时间 作为优先级
+			// 那么, 队列的顶端的任务的 "优先级最小",  也就是它 应该"最早超时"
 			now := time.Now().UnixNano()
 			dirty := false
 			if c.processInFlightQueue(now) {
 				dirty = true
 			}
 
-		// DeferredQueue 也是一个优先级队列
-		// 然后将这个 优先级队列 转换为 延时队列 来使用
-		// 将 任务"触发(发动)时间" 当做优先级, 放到队列里,
-		// 那么, 队列的顶端的任务的 "优先级最小",  也就是 "出发时间最早"
-		// 假如, 顶端任务的 触发时间 小于当前时间, 也就是触发时间还没到, 怎什么都不干,
-		// 并返回false, 表示 没有脏数据
-		// InFlightQueue 和 DeferredQueue 为什么要实现两次, InFlightQueue 其实跟 DeferredQueue 不是一样的么?
-		// 还真是, 之前两个就是一样的, 后来有一个提交: https://github.com/nsqio/nsq/commit/74bfde101934700cb0cd980d01b6dfe2fe5a6a53
-		// 里面的注释是: this eliminates the use of container/heap and
-		//	       the associated cost of boxing and interface
-		//             type assertions.
-		// 意思就是说, 这些 队列里 存的是 Message 这个类型, 如果使用 heap, 需要存到 heap.Item 的 Value 里
-		// 而这个value 是一个 interface{} , 赋值 和 取值 都需要做类型推断 和 包装
-		// 那么作为 InFlightQueue 这个 "高负荷" 的队列, 减少这种 "类型推断和包装" , 有利于提高性能
+			// DeferredQueue 也是一个优先级队列
+			// 然后同样将这个 优先级队列 转换为 延时队列 来使用
+			// 将 任务"触发(发动)时间" 当做优先级, 放到队列里
 			if c.processDeferredQueue(now) {
 				dirty = true
 			}
@@ -669,15 +660,6 @@ func (n *NSQD) queueScanWorker(workCh chan *Channel, responseCh chan bool, close
 	}
 }
 
-/*
-Channel本身在投递消息给消费者时维护两个队列，一个是inFlight队列，该队列存储正在投递，
-但还没被标记为投递成功的消息。另一个是deferred队列，用来存储需要被延时投递的消息。
-
-inFlight队列中消息可能因为投递超时而失败，deferred队列中的消息需要在到达指定时间后进行重新投递。
-如果为两个队列中的每个消息都分别指定定时器，无疑是非常消耗资源的。因此nsq采用定时扫描队列的做法。
-在扫描时采用多个worker分别处理。这种类似多线程的处理方式提高了处理效率。
-nsq在扫描策略上使用了Redis的probabilistic expiration算法，同时动态调整worker的数量，这些优化平衡了效率和资源占用。
- */
 // queueScanLoop runs in a single goroutine to process in-flight and deferred
 // priority queues. It manages a pool of queueScanWorker (configurable max of
 // QueueScanWorkerPoolMax (default: 4)) that process channels concurrently.
@@ -692,27 +674,35 @@ nsq在扫描策略上使用了Redis的probabilistic expiration算法，同时动
 // If QueueScanDirtyPercent (default: 25%) of the selected channels were dirty,
 // the loop continues without sleep.
 func (n *NSQD) queueScanLoop() {
+	//任务派发 队列
 	workCh := make(chan *Channel, n.getOpts().QueueScanSelectionCount)
+
+	//任务结果 队列
 	responseCh := make(chan bool, n.getOpts().QueueScanSelectionCount)
+
+	// 用来优雅关闭
 	closeCh := make(chan int)
 
 	workTicker := time.NewTicker(n.getOpts().QueueScanInterval)
 	refreshTicker := time.NewTicker(n.getOpts().QueueScanRefreshInterval)
 
 	channels := n.channels()
+	// 确切一点, 这里应该叫 resizeWorkerPool
+	// 就是调整 queue scan 任务的 worker 的数量
+	// 当然, 一开始就是启动一些 worker
 	n.resizePool(len(channels), workCh, responseCh, closeCh)
 
 	for {
 		select {
-		case <-workTicker.C:
+		case <-workTicker.C: // 开始一次任务的派发
 			if len(channels) == 0 {
 				continue
 			}
-		case <-refreshTicker.C:
+		case <-refreshTicker.C:  // 重新调整 worker 数量
 			channels = n.channels()
 			n.resizePool(len(channels), workCh, responseCh, closeCh)
 			continue
-		case <-n.exitChan:
+		case <-n.exitChan:	// 退出
 			goto exit
 		}
 
@@ -722,11 +712,12 @@ func (n *NSQD) queueScanLoop() {
 		}
 
 		loop:
-		// 随机取出几个 channel
+		// 随机取出几个 channel, 派发给 worker 进行 扫描
 		for _, i := range util.UniqRands(num, len(channels)) {
 			workCh <- channels[i]
 		}
 
+		// 接收 扫描结果, 统一 有多少 channel 是 "脏" 的
 		numDirty := 0
 		for i := 0; i < num; i++ {
 			if <-responseCh {
@@ -734,6 +725,8 @@ func (n *NSQD) queueScanLoop() {
 			}
 		}
 
+		// 假如 "脏" 的 "比例" 大于阀值, 则不等待 workTicker
+		// 马上进行下一轮 扫描
 		if float64(numDirty) / float64(num) > n.getOpts().QueueScanDirtyPercent {
 			goto loop
 		}

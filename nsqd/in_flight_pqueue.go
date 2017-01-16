@@ -62,8 +62,12 @@ func (pq *inFlightPqueue) PeekAndShift(max int64) (*Message, int64) {
 
 	x := (*pq)[0]
 	if x.pri > max {
+		//如果 栈顶 元素的优先级 大于参数,
+		//栈不做操作, 返回空元素和 栈顶元素跟指定参数的差值
 		return nil, x.pri - max
 	}
+	// 如果 栈顶元素的优先级 小于参数
+	// 弹出 栈顶元素并返回
 	pq.Pop()
 
 	return x, 0
